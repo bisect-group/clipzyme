@@ -1,183 +1,93 @@
 from __future__ import annotations
 
-import math
+import argparse
+import json
+import re
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 
+from .utils import DEFAULT_OUT_ROOT, TASK, atomic_write
 
-CARE_TASK2_K_VALUES = (1, 3, 5, 10, 20, 30, 40, 50)
-SUPPLEMENTAL_HIT_KS = (1, 3, 5, 10, 20, 30, 40, 50)
-
-
-def rank_columns(df: pd.DataFrame) -> list[str]:
-    columns = [str(column) for column in df.columns if str(column).isdigit()]
-    return sorted(columns, key=lambda value: int(value))
+K_VALUES = (1, 3, 5, 10, 20, 30, 40, 50)
+LEVELS = (4, 3, 2, 1)
 
 
-def split_ec_labels(value: object) -> list[str]:
-    if value is None:
-        return []
-    if isinstance(value, float) and math.isnan(value):
-        return []
-    labels = []
-    for raw in str(value).replace(",", ";").split(";"):
-        label = raw.strip()
-        if label and label.lower() not in {"nan", "none", "null", "-", "-.-.-.-"}:
-            labels.append(label)
-    return sorted(set(labels))
+def matched_levels(true_ec: str, ranked: list[str]) -> int:
+    """Longest EC prefix (0-4 levels) that the true EC shares with any ranked EC."""
+    true_parts = true_ec.split(".")
+    best = 0
+    for ec in ranked:
+        n = 0
+        for a, b in zip(ec.split("."), true_parts):
+            if a != b:
+                break
+            n += 1
+        best = max(best, n)
+    return best
 
 
-def ec_prefixes(label: str) -> list[str]:
-    parts = [part.strip() for part in str(label).split(".")]
-    prefixes = []
-    for idx, part in enumerate(parts[:4]):
-        if not part or part == "-":
-            break
-        prefixes.append(".".join(parts[: idx + 1]))
-    return prefixes
+def ec_level_accuracy(predictions: pd.DataFrame, k_values=K_VALUES) -> dict[str, dict[str, float]]:
+    """Level-L accuracy at k in percent: share of true ECs matched to level L by the top-k ranked ECs.
 
-
-def get_accuracy_level(predicted_ecs: list[str], true_ecs: list[str]) -> list[int]:
-    if not predicted_ecs:
-        predicted_ecs = ["0.0.0.0"]
-    levels = []
-    for true_ec in true_ecs:
-        true_parts = str(true_ec).split(".")
-        counters = []
-        for predicted_ec in predicted_ecs:
-            predicted = str(predicted_ec)
-            if predicted.count(".") != 3:
-                predicted = "0.0.0.0"
-            predicted_parts = predicted.split(".")
-            counter = 0
-            for predicted_part, true_part in zip(predicted_parts, true_parts):
-                if predicted_part == true_part:
-                    counter += 1
-                else:
-                    break
-            counters.append(counter)
-        levels.append(int(np.max(counters)) if counters else 0)
-    return levels
-
-
-def _average_accuracy(levels: list[int], level: int) -> float:
-    if not levels:
-        return 0.0
-    return float(np.mean([1 if value >= level else 0 for value in levels]))
-
-
-def compute_care_task2_metrics(
-    care_df: pd.DataFrame,
-    *,
-    k_values: tuple[int, ...] = CARE_TASK2_K_VALUES,
-) -> dict:
-    ranks = rank_columns(care_df)
-    if not ranks:
-        raise ValueError("CARE Task 2 DataFrame does not contain rank columns")
+    A reaction with several true ECs counts each EC with equal weight inside that reaction.
+    """
     metrics = {}
     for k in k_values:
-        rows = []
-        for _, row in care_df.iterrows():
-            true_ecs = split_ec_labels(row["EC number"])
-            predicted = [
-                str(row[column])
-                for column in ranks[:k]
-                if pd.notna(row[column]) and str(row[column]).strip()
-            ]
-            rows.append(get_accuracy_level(predicted, true_ecs))
-        metrics[f"k={k}"] = {
-            f"level_{level}_accuracy": round(
-                float(np.mean([_average_accuracy(levels, level) for levels in rows])) * 100.0,
-                4,
-            )
-            for level in (4, 3, 2, 1)
-        }
-        metrics[f"k={k}"].update(
-            {f"level_{level}_support": int(len(rows)) for level in (4, 3, 2, 1)}
-        )
+        hits = {level: [] for level in LEVELS}
+        for true_ecs, ranked in zip(predictions["true_ecs"], predictions["ranked_ecs"]):
+            matched = [matched_levels(ec, list(ranked[:k])) for ec in true_ecs]
+            for level in LEVELS:
+                hits[level].append(sum(m >= level for m in matched) / len(matched))
+        metrics[f"k={k}"] = {f"level_{level}": 100 * sum(h) / len(h) for level, h in hits.items()}
     return metrics
 
 
-def compute_supplemental_ec_metrics(
-    care_df: pd.DataFrame,
-    *,
-    hit_ks: tuple[int, ...] = SUPPLEMENTAL_HIT_KS,
-) -> dict:
-    ranks = rank_columns(care_df)
-    if not ranks:
-        raise ValueError("CARE Task 2 DataFrame does not contain rank columns")
-
-    row_rr = []
-    label_rr = []
-    average_precisions = []
-    mean_ranks = []
-    row_hits = {k: [] for k in hit_ks}
-    label_hits = {k: [] for k in hit_ks}
-
-    for _, row in care_df.iterrows():
-        predictions = [
-            str(row[column])
-            for column in ranks
-            if pd.notna(row[column]) and str(row[column]).strip()
-        ]
-        true_labels = set(split_ec_labels(row["EC number"]))
-        first_ranks = []
-        precision_hits = 0
-        precision_sum = 0.0
-        for rank, predicted in enumerate(predictions, start=1):
-            if predicted in true_labels:
-                precision_hits += 1
-                precision_sum += precision_hits / rank
-        average_precisions.append(precision_sum / len(true_labels) if true_labels else 0.0)
-
-        for true_label in true_labels:
-            first_rank = None
-            for rank, predicted in enumerate(predictions, start=1):
-                if predicted == true_label:
-                    first_rank = rank
-                    break
-            first_ranks.append(first_rank)
-            if first_rank is not None:
-                mean_ranks.append(first_rank)
-            label_rr.append(0.0 if first_rank is None else 1.0 / first_rank)
-            for k in hit_ks:
-                label_hits[k].append(first_rank is not None and first_rank <= k)
-
-        row_first_rank = min((rank for rank in first_ranks if rank is not None), default=None)
-        row_rr.append(0.0 if row_first_rank is None else 1.0 / row_first_rank)
-        for k in hit_ks:
-            row_hits[k].append(row_first_rank is not None and row_first_rank <= k)
-
-    row_metrics = {
-        "mrr": round(float(np.mean(row_rr)), 6) if row_rr else 0.0,
-        "map": round(float(np.mean(average_precisions)), 6) if average_precisions else 0.0,
-        **{
-            f"hit@{k}": round(float(np.mean(values)) * 100.0, 4) if values else 0.0
-            for k, values in row_hits.items()
-        },
-    }
-    label_metrics = {
-        "mrr": round(float(np.mean(label_rr)), 6) if label_rr else 0.0,
-        **{
-            f"hit@{k}": round(float(np.mean(values)) * 100.0, 4) if values else 0.0
-            for k, values in label_hits.items()
-        },
-    }
-    return {
-        "rank_columns": int(len(ranks)),
-        "rows": int(len(care_df)),
-        "row": row_metrics,
-        "label_weighted": label_metrics,
-        "mrr": row_metrics["mrr"],
-        "map": row_metrics["map"],
-        "mean_rank": round(float(np.mean(mean_ranks)), 6) if mean_ranks else None,
-        "median_rank": round(float(np.median(mean_ranks)), 6) if mean_ranks else None,
-        **{f"hit@{k}": row_metrics[f"hit@{k}"] for k in hit_ks},
-    }
+def aggregate(out_root: str | Path) -> None:
+    """Rebuild the summary CSVs from the saved predictions of every finished run."""
+    root = Path(out_root) / TASK
+    rows = []
+    for path in sorted(root.glob("**/seed_*/predictions.parquet")):
+        group_name, seed = (
+            path.parent.parent.relative_to(root),
+            int(path.parent.name.split("_")[1]),
+        )
+        predictions = pd.read_parquet(path)
+        metrics = ec_level_accuracy(predictions)
+        saved = path.parent / "metrics.json"
+        if saved.exists() and json.loads(saved.read_text())["accuracy"] != json.loads(
+            json.dumps(metrics)
+        ):
+            print(
+                f"[results] metrics.json differs from the predictions: {path.parent}", flush=True
+            )
+        for k, levels in metrics.items():
+            rows.append(
+                {
+                    "split_group": "/".join(group_name.parts[:-1]),
+                    "split_name": group_name.name,
+                    "seed": seed,
+                    "k": int(re.sub(r"\D", "", k)),
+                    "queries": len(predictions),
+                    "scored_as_miss": int((predictions["ranked_ecs"].map(len) == 0).sum()),
+                    **levels,
+                }
+            )
+    if not rows:
+        raise FileNotFoundError(f"No predictions.parquet under {root}")
+    by_seed = pd.DataFrame(rows)
+    keys = ["split_group", "split_name", "k"]
+    summary = by_seed.groupby(keys)[[f"level_{level}" for level in LEVELS]].agg(["mean", "std"])
+    summary.columns = [f"{level}_{stat}" for level, stat in summary.columns]
+    summary["seeds"] = by_seed.groupby(keys)["seed"].nunique()
+    atomic_write(root / "summary_by_seed.csv", lambda tmp: by_seed.to_csv(tmp, index=False))
+    atomic_write(root / "summary.csv", lambda tmp: summary.reset_index().to_csv(tmp, index=False))
+    print(f"[results] wrote {root / 'summary.csv'} ({len(by_seed)} rows)", flush=True)
 
 
-def load_care_csv(path: str | Path) -> pd.DataFrame:
-    return pd.read_csv(path)
-
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Rebuild Clipzyme retrieval summaries from saved predictions"
+    )
+    parser.add_argument("--out_root", default=str(DEFAULT_OUT_ROOT))
+    aggregate(parser.parse_args().out_root)

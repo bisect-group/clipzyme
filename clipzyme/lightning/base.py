@@ -221,12 +221,12 @@ class Base(pl.LightningModule, Nox):
 
         return logged_output
 
-    def training_step(self, batch, batch_idx, optimizer_idx=None):
+    def training_step(self, batch, batch_idx):
         """
         Single training step
         """
         self.phase = "train"
-        output = self.step(batch, batch_idx, optimizer_idx)
+        output = self.step(batch, batch_idx, None)
         self.training_step_outputs.append(output)
         return output
 

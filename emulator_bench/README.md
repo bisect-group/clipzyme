@@ -1,133 +1,108 @@
-# Clipzyme EMULaToR Retrieval Wrapper
+# Clipzyme wrapper for EMULaToR (enzyme retrieval)
 
-This wrapper adapts `baselines/Clipzyme` to
-`data/processed/datasets/enzyme_retrieval_dataset` without replacing Clipzyme's
-native Lightning trainer.
+This wrapper trains Clipzyme with its published settings on the EMULaToR enzyme retrieval splits.
+It runs several seeds on every split folder. It does no tuning.
+Run every command from the submodule root (`baselines/Clipzyme`).
 
-## Data Mapping
+## Atom maps
 
-- Split discovery recursively finds folders containing `train.parquet`,
-  `val.parquet`, and `test.parquet`.
-- Required parquet columns are `rxn_smiles`, `sequence`, and `ec_number`.
-- `val` is written as Clipzyme `dev`.
-- Rows with missing or partial EC labels are removed by default.
-- Protein sequences are truncated to Clipzyme's 650-aa limit before IDs and
-  manifests are generated.
-- Each split file is deduplicated by normalized `rxn_smiles`, truncated
-  `sequence`, and normalized `ec_number`.
-- The dataset has no stable common IDs, so pseudo IDs are SHA-256 content hashes.
+Clipzyme needs atom-mapped reactions. The wrapper reads the EMULaToR LocalMapper maps from
+`data/processed/datasets/enzyme_retrieval_dataset/reaction_atom_mappings.parquet` (`--atom_map_file`).
+It joins on `rxn_smiles` and keeps rows with `atom_mapping_status == "mapped"`.
+Rows without a map, and rows that the original featurization cannot read, are counted per split in `inputs/stats.json`.
+`inputs/` is reused only when the atom-map file, the three source parquet files (path, size, mtime), the row limits and `INPUTS_VERSION` match `stats.json["fingerprint"]`. Otherwise it is rebuilt.
+The original featurization needs a map number on every atom, so reactions with unmapped atoms are dropped.
+Train and val rows that fail are dropped. Test rows that fail stay in the test set and are scored as misses (empty ranking at every k).
+The wrapper never runs a mapper.
 
-## Cache And Generated Files
+## Environment
 
-`cache_features.py` writes:
+Use the `clipzyme` env from `environment.yml` (`PY` below). It needs torch, pytorch-lightning, torch-geometric,
+torch-scatter, fair-esm 2.0.0 (not the `esm` package of ESM3), rdkit, pandas, pyarrow, tensorboard, gitpython,
+comet_ml, p_tqdm, wget and rxn-chem-utils. The build commands are in `commands.txt`.
+ESM-2 weights come from `<out_root>/weights/torch_hub` (`--hub_dir`). That folder holds the torch hub checkout
+`facebookresearch_esm_v2.0.0`, `trusted_list`, and `checkpoints/esm2_t33_650M_UR50D.pt` (2.6 GB) with its
+`-contact-regression.pt` file. The wrapper never downloads them.
 
-- shared RXNMapper atom-map cache under `emulator_bench/cache/atom_maps/`;
-- split manifests under `emulator_bench/runs/<split_slug>/manifests/`;
-- Clipzyme JSON and pickle inputs under
-  `emulator_bench/runs/<split_slug>/clipzyme_inputs/`;
-- split metadata under `emulator_bench/runs/<split_slug>/metadata.json`.
+## Data and splits
 
-RXNMapper failures, incomplete atom maps, non-computable bond changes, malformed
-reactions, mapped reactions that are incompatible with Clipzyme's native
-reactant/product graph tensor shapes, missing sequences, and incomplete EC labels
-are logged in metadata and removed.
+Splits come from `data/processed/datasets/enzyme_retrieval_dataset`. The wrapper finds every folder that has
+`train/val/test.parquet` with the columns `rxn_smiles`, `ec_number` and `sequence`. It prints the folders it skips.
+A leading `with_protein_information/` is removed from the name. `<group>/threshold_*` gives group and name.
+A folder without `threshold_*` gets the name `all`. Nothing is hard coded, so new folders are used when they appear.
+
+## Layout
+
+`OUT` is `--out_root` (default `outputs/baselines/Clipzyme`).
+
+```
+OUT/enzyme_retrieval/<group>/<name>/inputs/     Clipzyme JSON, pickles, train candidates, val and test queries, stats.json
+OUT/enzyme_retrieval/<group>/<name>/seed_<s>/   bestmodel.pth, lastmodel.pth, checkpoint_last.pt, predictions.parquet,
+                                                metrics.json, run_summary.json, train_summary.json, tensorboard/
+OUT/enzyme_retrieval/summary_by_seed.csv        rebuilt from predictions.parquet by emulator_bench.results
+OUT/enzyme_retrieval/summary.csv                mean and std (n-1) over seeds
+OUT/weights/torch_hub/                          ESM-2 weights
+OUT/logs/enzyme_retrieval/                      one log file per prepare and per run
+```
+
+`checkpoint_last.pt` holds the full training state (optimizer, scheduler). It is about 8 GB.
+`bestmodel.pth` and `lastmodel.pth` hold weights only (about 2.6 GB each).
+A run resumes from `checkpoint_last.pt` when it is started again.
+
+## Training
+
+`train.py` starts the original `scripts/main.py` through `run_main.py` with the settings of `default_hparams.json`.
+`run_main.py` only renames the Lightning checkpoint files, resumes from `checkpoint_last.pt`, and counts the
+samples that the original dataset code keeps. It changes no model code. With `--checkpoint_esm` it wraps the ESM-2 layer call in activation recomputation.
+One run uses one GPU. The optimizer step uses batch 8 and 8 accumulation steps (global batch 64).
+`--checkpoint_esm` recomputes the ESM-2 layers in the backward pass. The numbers stay the same. Batch 8 needs it on a 23 GB GPU.
+`--fast` applies the exact speed-ups of `fast_esm.py` at run time (the upstream package stays unchanged):
+ESM-2 attention through `scaled_dot_product_attention` and `F.gelu`; inside each micro-batch the ESM forward runs in length-sorted
+chunks of about 1024 tokens and the outputs return in the original order; ESM-2 layers recompute activations in the backward pass
+only when a micro-batch has more than 4000 tokens (with `--checkpoint_esm` they always recompute); vectorised `get_reverse_edge_indices`.
+Micro-batches, batch order and contrastive negatives do not change. In `evaluate`, `--fast` also uses SDPA and encodes the candidate
+enzymes in order of length. Results equal the default path up to floating-point noise (fp32 tests in `tests/test_fast_esm.py`).
+`--amp` is off by default (original precision, bf16). With `--amp`: bf16 on Ampere or newer, fp16 on older GPUs, fp32 on CPU.
+
+## Frozen ESM-2 (`--frozen_esm`)
+
+This path follows `configs/train/clip_esm_frozen.json`: `clip_freeze_esm`, ESM-2 650M never trains. The reaction DMPNNs,
+`ln_final` and `logit_scale` train. The frozen values are in the `frozen_hparams` section of `default_hparams.json`:
+10 epochs, weight decay 0 (the config sets none, so the code default), and 32 samples per optimizer step. `--epochs` replaces the epoch count.
+`from_checkpoint` and `cache_path` are not used. The scheduler quirk of the default path stays: warm-up lasts 100 epochs.
+
+The model reads one vector per protein: the mean of ESM layer 33 over the residues (without CLS and EOS), then `ln_final`.
+ESM-2 has no dropout, so the vector is the same at every step. `esm_cache.py` computes it once per unique sequence
+(at most 650 aa, train, val and test of every split) in fp32 without TF32, in length-sorted chunks of about 24k tokens, and stores it
+under `OUT/embeddings/esm_frozen_v1/` (`manifest.json` with the recipe, `part_*.pt` files keyed by the sha256 of the sequence).
+A part is written atomically, so a stopped build continues. A different recipe is refused. Run it before training:
+
+```
+CUDA_VISIBLE_DEVICES=0 $PY -m emulator_bench.esm_cache --shard 0 --shards 3   # one process per GPU
+```
+
+With `--frozen_esm`, `train.py` and `evaluate.py` check the cache, load it onto the GPU and return `cache[sequence]` instead of
+running ESM-2. The ESM-2 weights are loaded and dropped at model creation, so seed, initial weights and batch draws equal the
+original frozen run, and checkpoints hold no ESM-2 weights (evaluate with `--frozen_esm` too).
+
+Mapping of 4 GPUs to one GPU. In the original run each GPU takes 8 samples and contrasts them against all 32 gathered features of the step.
+The gathered features carry no gradient, so they are constants, and DDP averages the 4 gradients. The wrapper loads 32 samples per step.
+`virtual_ranks.py` encodes the reactions of each virtual rank of 8 separately (one padded batch of 32 would need a dense
+`[graphs, atoms, atoms, 1280]` tensor sized by the largest graph of the whole step), builds the 32 protein vectors, and takes the mean of the
+4 per-rank losses, each against the 32 constant features, in one backward pass. The model has no batch-dependent layer (no batch norm, dropout 0),
+so encoding in ranks equals one batch up to floating-point noise. Validation uses the same loss on batches of 32.
+`tests/test_frozen_esm.py` compares the gradient with four real gloo processes that run the original `CLIPLoss`, and the rank-wise encoder with one batch.
+
+## Evaluation
+
+`evaluate.py` loads `bestmodel.pth` and embeds every unique enzyme of the candidate pool and every test reaction.
+The pool holds the proteins of train, val and test (at most 650 aa).
+Each test reaction ranks the ECs of the pool. The score of an EC is the best cosine to any pool enzyme with that EC.
+It saves the top 50 ECs per reaction in `predictions.parquet`.
+Level-L accuracy at k is the share of true ECs of a reaction that the top-k ECs match up to level L (L = 4 is the exact EC).
+Level 4 to level 1 map to the `X.X.X.X` to `X.-.-.-` columns of the paper. Values are given for k = 1, 3, 5, 10, 20, 30, 40, 50.
+`results.py` rebuilds the summary CSVs from the predictions and checks them against `metrics.json`.
 
 ## Commands
 
-Use the provided environment:
-
-```bash
-conda run -n clipzyme python -m emulator_bench.cache_features \
-  --dataset-root ../../data/processed/datasets/enzyme_retrieval_dataset \
-  --split-group random_splits
-```
-
-Train through Clipzyme's native dispatcher:
-
-```bash
-conda run -n clipzyme python -m emulator_bench.train \
-  --split-group random_splits \
-  --seed 42 \
-  --epochs 20 \
-  --precision bf16
-```
-
-Evaluate the checkpoint produced by training:
-
-```bash
-conda run -n clipzyme python -m emulator_bench.evaluate \
-  --split-group random_splits \
-  --seed 42 \
-  --eval-split test
-```
-
-Queue all discovered split groups and default seeds `42,43,44` through
-task-spooler:
-
-```bash
-conda run -n clipzyme python -m emulator_bench.queue_pipeline \
-  --dataset-root ../../data/processed/datasets/enzyme_retrieval_dataset \
-  --epochs 20 \
-  --precision bf16
-```
-
-The queue wrapper defaults `--available-gpus` to `${CUDA_VISIBLE_DEVICES:-0}` so
-task-spooler GPU assignment is preserved inside Clipzyme's native dispatcher.
-Pass a concrete GPU only when you intentionally want to bypass task-spooler GPU
-selection.
-
-Reruns are incremental. The cache stage is still submitted so missing atom-map
-entries are generated, but existing per-reaction JSON cache entries are
-validated and reused. Queue submission skips a seed's train job when its
-`train_seed.json` points to an existing checkpoint; evaluation then depends on
-the refreshed cache job instead of a retrain job.
-
-Required smoke-test shape:
-
-```bash
-CUDA_VISIBLE_DEVICES=3 conda run -n clipzyme python -m emulator_bench.queue_pipeline \
-  --split-group random_splits \
-  --seed 42 \
-  --epochs 1 \
-  --limit-per-split 64 \
-  --batch-size 1 \
-  --accumulate-grad-batches 16 \
-  --clip-freeze-esm \
-  --eval-split test \
-  --gpus-per-job 0
-```
-
-For full benchmark runs, omit `--limit-per-split`, `--batch-size`,
-`--accumulate-grad-batches`, and `--clip-freeze-esm` unless the target GPU memory
-requires those overrides.
-The repository-level `queue_multiple_seeds.sh` targets the local 22 GB A10
-task-spooler setup and therefore passes
-`--batch-size 1 --accumulate-grad-batches 16`. This keeps the previous
-single-GPU optimizer update size from the default `batch_size=8` and
-`accumulate_grad_batches=2`, but the smaller microbatch still changes CLIP's
-in-batch negative set. If trainable ESM still exceeds GPU memory, add
-`--clip-freeze-esm` and report that run separately.
-
-## Metrics
-
-Native Clipzyme metrics are preserved through dispatcher evaluation:
-`clip_loss`, `clip_accuracy`, and `clip_quantile`.
-
-The wrapper also emits CARE Task 2 outputs under
-`emulator_bench/runs/<split_slug>/seeds/<seed>/results/<split>/`:
-
-- `care_task2_ranked_ec.csv` with metadata columns plus rank columns
-  `0,1,2,...`;
-- `care_task2_metrics.json` with level-1/2/3/4 accuracy at
-  `k = 1,3,5,10,20,30,40,50`;
-- `supplemental_metrics.json` with exact-EC MRR, MAP, hit@k, mean rank, median
-  rank, and row/rank counts.
-
-## Environment Notes
-
-The `clipzyme` environment must include parquet, atom-mapping, and
-`pkg_resources` support:
-
-```bash
-conda run -n clipzyme python -m pip install 'setuptools<81' pyarrow rxnmapper tensorboard
-```
+See `commands.txt`.

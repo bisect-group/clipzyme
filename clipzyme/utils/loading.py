@@ -319,7 +319,7 @@ def get_lightning_model(args: Namespace):
         for k, v in vars(snargs).items():
             if k not in args:
                 setattr(args, k, v)
-        model = model.load_from_checkpoint(
+        model = type(model).load_from_checkpoint(
             checkpoint_path=modelpath,
             strict=not args.relax_checkpoint_matching,
             **{"args": args},
