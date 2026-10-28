@@ -208,7 +208,7 @@ def main() -> None:
     add_run_args(parser)
     parser.add_argument("--checkpoint", default=None, help="Default: <run>/bestmodel.pth")
     parser.add_argument("--device", default=None)
-    parser.add_argument("--eval_batch_size", type=int, default=16)
+    parser.add_argument("--eval_batch_size", type=int, default=4)
     args = parser.parse_args()
     seeds = args.seeds
     for split in select_splits(discover_splits(args.dataset_root)[0], args.split_groups):
