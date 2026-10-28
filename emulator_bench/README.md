@@ -106,3 +106,32 @@ Level 4 to level 1 map to the `X.X.X.X` to `X.-.-.-` columns of the paper. Value
 ## Commands
 
 See `commands.txt`.
+
+## Verify equivalence
+
+```bash
+conda activate clipzyme                       # needs fair-esm 2.0.0
+emulator_bench/verify_equivalence.sh          # CPU, about 15 s, no downloads, no private data
+emulator_bench/verify_equivalence.sh --gpu    # also the bf16 production test
+emulator_bench/verify_equivalence.sh --negative-control  # the GPU test must FAIL, needs a CUDA device
+```
+
+The CPU mode compares the wrapper with the original fair-esm and CLIPZyme code on a random ESM-2 (3 layers, dimension 8) and
+the fixture `tests/fixtures/tiny_enzyme_reactions.json` (8 synthetic reaction and protein rows). It checks:
+SDPA, GELU, chunked and recomputed ESM-2 forward and gradients (relative difference 1e-5, 1e-6 for recompute);
+the vectorised reverse edge indices (exact); the frozen ESM cache against the in-loop ESM (1e-5);
+the virtual-GPU loss against four gloo DDP processes (gradients 1e-5); and five AdamW steps of the cache path against the
+in-loop frozen path in fp32 (step 0: 1e-5, later steps and held-out loss: 1e-4). The script fails when a test is skipped.
+`tests/test_frozen_esm.py::test_cache_vectors_equal_in_loop_esm2_on_real_sequences` needs the 650M weights. It carries the marker
+`real_weights` and the script leaves it out. A tiny-model test covers the same code path.
+
+Not exact: AdamW grows the fp32 rounding noise over many steps. The real run of 24 Oct (42 steps) reached about 1e-3 in the loss,
+the same as a control with 1e-6 noise on the ESM vectors, so the weights after training are not bit equal.
+`emulator_bench/check_equivalence.py` is the full check on real data. It needs the dataset root and the ESM-2 weights.
+
+The `--gpu` test trains 20 steps with the production path (`--frozen_esm --amp --fast`: fp32 ESM cache, bf16 autocast) and with the
+original precision path (in-loop ESM, bf16 autocast; the original config uses bf16). A noise control reruns the production path with
+initial weights perturbed by 2**-8 (relative, one bf16 rounding). The per-step loss gap and the held-out loss gap between production and the original path must stay within 10 times the
+gap the perturbation causes. Step 0 is judged like every other step: its gap must be at most 10 times its floor. The test prints the measured ratio (run with `-s`). The tiny ESM-2 of this test and of the cache-vector and fp32 tests uses
+`token_dropout=True` as the real model (the fp32 and cache-vector tests also run with `False`).
+`--negative-control` multiplies the initial weights of the production run by 1.05. The GPU test must then fail; the script exits 0 only if so.

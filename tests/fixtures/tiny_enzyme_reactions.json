@@ -1,0 +1,50 @@
+[
+ {
+  "rxn_smiles": "[CH3:1][C:2](=[O:3])[OH:4].[OH:5][CH2:6][CH3:7]>>[CH3:1][C:2](=[O:3])[O:5][CH2:6][CH3:7].[OH2:4]",
+  "reactants": "[CH3:1][C:2](=[O:3])[OH:4].[OH:5][CH2:6][CH3:7]",
+  "products": "[CH3:1][C:2](=[O:3])[O:5][CH2:6][CH3:7].[OH2:4]",
+  "sequence": "MKTAYIAKQR"
+ },
+ {
+  "rxn_smiles": "[CH3:1][CH2:2][OH:3]>>[CH3:1][CH:2]=[O:3]",
+  "reactants": "[CH3:1][CH2:2][OH:3]",
+  "products": "[CH3:1][CH:2]=[O:3]",
+  "sequence": "MQIFVKTLTGKTITLEVEPSDTIENVKAKIQDKEGIPPDQQRLIFAGKQLEDGRTLSDYNIQKESTLHLVLRLRGG"
+ },
+ {
+  "rxn_smiles": "[CH3:1][CH2:2][CH2:3][OH:4]>>[CH3:1][CH2:2][CH:3]=[O:4]",
+  "reactants": "[CH3:1][CH2:2][CH2:3][OH:4]",
+  "products": "[CH3:1][CH2:2][CH:3]=[O:4]",
+  "sequence": "KVFGRCELAAAMKRHGLDNYRGYSLGNWVCAAKFESNFNTQATNRNTDGSTDYGILQINSRWWCNDGRTPGSRNLCNIPCSALL"
+ },
+ {
+  "rxn_smiles": "[CH3:1][CH:2]([OH:3])[CH3:4]>>[CH3:1][C:2](=[O:3])[CH3:4]",
+  "reactants": "[CH3:1][CH:2]([OH:3])[CH3:4]",
+  "products": "[CH3:1][C:2](=[O:3])[CH3:4]",
+  "sequence": "MSKGEELFTGVVPILVELDGDVNGHKFSVSGEGEGDATYGKLTLKFICTTGKLPVPWPTLVTTFSYGVQCFSRYPDHMKQHDFF"
+ },
+ {
+  "rxn_smiles": "[CH3:1][C:2](=[O:3])[OH:4].[OH:5][CH2:6][CH3:7]>>[CH3:1][C:2](=[O:3])[O:5][CH2:6][CH3:7].[OH2:4]",
+  "reactants": "[CH3:1][C:2](=[O:3])[OH:4].[OH:5][CH2:6][CH3:7]",
+  "products": "[CH3:1][C:2](=[O:3])[O:5][CH2:6][CH3:7].[OH2:4]",
+  "sequence": "MKV"
+ },
+ {
+  "rxn_smiles": "[CH3:1][CH2:2][OH:3]>>[CH3:1][CH:2]=[O:3]",
+  "reactants": "[CH3:1][CH2:2][OH:3]",
+  "products": "[CH3:1][CH:2]=[O:3]",
+  "sequence": "MKTAYIAKQRQISFVKSHFSRQ"
+ },
+ {
+  "rxn_smiles": "[CH3:1][CH2:2][CH2:3][OH:4]>>[CH3:1][CH2:2][CH:3]=[O:4]",
+  "reactants": "[CH3:1][CH2:2][CH2:3][OH:4]",
+  "products": "[CH3:1][CH2:2][CH:3]=[O:4]",
+  "sequence": "MKTAYIA"
+ },
+ {
+  "rxn_smiles": "[CH3:1][CH:2]([OH:3])[CH3:4]>>[CH3:1][C:2](=[O:3])[CH3:4]",
+  "reactants": "[CH3:1][CH:2]([OH:3])[CH3:4]",
+  "products": "[CH3:1][C:2](=[O:3])[CH3:4]",
+  "sequence": "MSKGEELFTG"
+ }
+]
