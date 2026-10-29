@@ -105,7 +105,7 @@ def train_once(tiny, alphabet, steps, device, autocast, noise, scale):
         generator = torch.Generator().manual_seed(123)
         with torch.no_grad():
             for p in trainable:
-                p += (NOISE_U * p.abs() * torch.randn(p.shape, generator=generator)).to(p.device)
+                p += NOISE_U * p.abs() * torch.randn(p.shape, generator=generator).to(p.device)
     if scale != 1.0:
         with torch.no_grad():
             for p in trainable:
@@ -146,8 +146,9 @@ def reference_and_candidate(tmp_path, steps, device, autocast, noise=False, scal
     fast_esm.patch_esm_kernels()
     fast_esm.patch_reverse_edges()
     candidate = train(tiny, alphabet, steps, device, autocast, cache=tmp_path, scale=scale)
+    clean = train(tiny, alphabet, steps, device, autocast, cache=tmp_path) if scale != 1.0 else candidate
     noisy = train(tiny, alphabet, steps, device, autocast, cache=tmp_path, noise=True) if noise else None
-    return reference, candidate, noisy
+    return reference, candidate, noisy, clean
 
 
 @pytest.mark.parametrize("token_dropout", [False, True])
@@ -158,7 +159,7 @@ def test_cached_training_follows_in_loop_esm_training_fp32(tmp_path, token_dropo
     steps; the measured growth on the real run was 1e-3 over 42 steps, the same as a 1e-6 noise control. The bound
     for 5 steps is 1e-4 for the training losses and for the loss on the held-out batch.
     """
-    (ref_losses, ref_eval), (cand_losses, cand_eval), _ = reference_and_candidate(
+    (ref_losses, ref_eval), (cand_losses, cand_eval), _, _ = reference_and_candidate(
         tmp_path, 5, "cpu", autocast=False, token_dropout=token_dropout
     )
     assert abs(ref_losses[0] - cand_losses[0]) / abs(ref_losses[0]) < 1e-5
@@ -173,7 +174,7 @@ def test_production_path_within_noise_control(tmp_path):
 
     clip_esm_frozen.json trains in bf16, so the original precision is bf16 too. The two paths differ in the ESM
     vector (fp32 cache vs bf16 in-loop forward) and in kernels. A noise control reruns the production path with the
-    initial weights perturbed by 2**-8 (relative, one bf16 rounding). Floor = |perturbed production - production|,
+    initial weights perturbed by 2**-8 (relative, one bf16 rounding). Floor = |perturbed production - unscaled production|,
     gap = |production - original|. The per-step loss gap (20 steps, 4 virtual ranks) and the held-out loss gap must stay
     within K times the floor. Step 0 is judged like every other step.
     The ESM-2 has token_dropout=True, as the real model. With EQUIV_NEGATIVE_CONTROL=1 the production initial weights
@@ -181,13 +182,13 @@ def test_production_path_within_noise_control(tmp_path):
     """
     if not torch.cuda.is_available():
         pytest.skip("no CUDA device visible")
-    (ref, ref_eval), (cand, cand_eval), (noise, noise_eval) = reference_and_candidate(
+    (ref, ref_eval), (cand, cand_eval), (noise, noise_eval), (clean, clean_eval) = reference_and_candidate(
         tmp_path, 20, "cuda", autocast=True, noise=True, scale=1.05 if NEGATIVE_CONTROL else 1.0, token_dropout=True
     )
-    ref, cand, noise = (torch.tensor(x, dtype=torch.float64) for x in (ref, cand, noise))
+    ref, cand, noise, clean = (torch.tensor(x, dtype=torch.float64) for x in (ref, cand, noise, clean))
     tiny = 1e-7 * ref.abs().max()
-    gap, floor = (cand - ref).abs(), (noise - cand).abs()
-    final_gap, final_floor = abs(cand_eval - ref_eval), abs(noise_eval - cand_eval)
+    gap, floor = (cand - ref).abs(), (noise - clean).abs()
+    final_gap, final_floor = abs(cand_eval - ref_eval), abs(noise_eval - clean_eval)
     tiny0 = 1e-7 * ref[0].abs()
     gap0, floor0 = float(gap[0]), float(floor[0])
     print(
